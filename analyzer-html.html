@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Faderfox PC12 SysEx Analyzer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100">
+    <div id="app" class="min-h-screen p-6">
+        <div class="max-w-6xl mx-auto">
+            <div class="mb-8">
+                <h1 class="text-3xl font-bold mb-2">Faderfox PC12 SysEx Analyzer</h1>
+                <p class="text-gray-400">Capture and analyze SysEx dumps from your PC12</p>
+            </div>
+
+            <div class="bg-gray-800 rounded-lg p-6 mb-6">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-3">
+                        <div id="connection-icon">⚪</div>
+                        <div>
+                            <p class="font-semibold" id="device-name">No device found</p>
+                            <p class="text-sm text-gray-400" id="status">Initializing...</p>
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                        <button id="connect-btn" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:cursor-not-allowed rounded-lg transition">
+                            Connect to PC12
+                        </button>
+                        <button id="disconnect-btn" class="hidden px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg transition">
+                            Disconnect
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bg-gray-900 rounded p-4 text-sm">
+                    <p class="text-yellow-400 mb-2">📋 Instructions:</p>
+                    <ol class="list-decimal list-inside space-y-1 text-gray-300">
+                        <li>Click "Connect to PC12" above</li>
+                        <li>On your PC12: Press <strong>SHIFT + Blue key</strong>, then press <strong>Button 7</strong></li>
+                        <li>The current setup will be dumped via SysEx</li>
+                        <li>Try different setups and configurations to capture multiple dumps</li>
+                        <li>Download dumps to compare and reverse-engineer the format</li>
+                    </ol>
+                </div>
+            </div>
+
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-bold">Captured SysEx Dumps (<span id="dump-count">0</span>)</h2>
+                    <button id="clear-btn" class="hidden px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded transition">
+                        🗑️ Clear All
+                    </button>
+                </div>
+
+                <div id="dumps-container">
+                    <div class="text-center py-12 text-gray-500">
+                        <div class="text-5xl mb-4">📄</div>
+                        <p>No SysEx dumps captured yet</p>
+                        <p class="text-sm">Connect and trigger a dump from your PC12</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let midiAccess = null;
+        let pc12Input = null;
+        let pc12Output = null;
+        let connected = false;
+        let dumps = [];
+
+        const elements = {
+            connectionIcon: document.getElementById('connection-icon'),
+            deviceName: document.getElementById('device-name'),
+            status: document.getElementById('status'),
+            connectBtn: document.getElementById('connect-btn'),
+            disconnectBtn: document.getElementById('disconnect-btn'),
+            clearBtn: document.getElementById('clear-btn'),
+            dumpCount: document.getElementById('dump-count'),
+            dumpsContainer: document.getElementById('dumps-container')
+        };
+
+        function updateStatus(message) {
+            elements.status.textContent = message;
+        }
+
+        function findPC12(access) {
+            let foundInput = null;
+            let foundOutput = null;
+
+            for (let input of access.inputs.values()) {
+                console.log('Found input:', input.name);
+                if (input.name.toLowerCase().includes('faderfox') || 
+                    input.name.toLowerCase().includes('pc12')) {
+                    foundInput = input;
+                    break;
+                }
+            }
+
+            for (let output of access.outputs.values()) {
+                console.log('Found output:', output.name);
+                if (output.name.toLowerCase().includes('faderfox') || 
+                    output.name.toLowerCase().includes('pc12')) {
+                    foundOutput = output;
+                    break;
+                }
+            }
+
+            if (foundInput && foundOutput) {
+                pc12Input = foundInput;
+                pc12Output = foundOutput;
+                elements.deviceName.textContent = foundInput.name;
+                updateStatus(`Found: ${foundInput.name}`);
+                elements.connectBtn.disabled = false;
+            } else {
+                updateStatus('PC12 not found. Make sure it\'s connected via USB.');
+                elements.connectBtn.disabled = true;
+            }
+        }
+
+        function handleMidiMessage(event) {
+            const data = event.data;
+            
+            // Check if it's a SysEx message
+            if (data[0] === 0xF0 && data[data.length - 1] === 0xF7) {
+                console.log('SysEx received:', data.length, 'bytes');
+                const timestamp = new Date().toLocaleTimeString();
+                const dump = {
+                    id: Date.now(),
+                    timestamp,
+                    data: Array.from(data),
+                    size: data.length
+                };
+                
+                dumps.unshift(dump);
+                updateStatus(`Received SysEx dump: ${data.length} bytes`);
+                renderDumps();
+            }
+        }
+
+        function connectToPC12() {
+            if (!pc12Input) {
+                updateStatus('No PC12 device found');
+                return;
+            }
+
+            pc12Input.onmidimessage = handleMidiMessage;
+            connected = true;
+            elements.connectionIcon.textContent = '🟢';
+            updateStatus('Connected! Listening for SysEx dumps...');
+            elements.connectBtn.classList.add('hidden');
+            elements.disconnectBtn.classList.remove('hidden');
+        }
+
+        function disconnect() {
+            if (pc12Input) {
+                pc12Input.onmidimessage = null;
+            }
+            connected = false;
+            elements.connectionIcon.textContent = '⚪';
+            updateStatus('Disconnected');
+            elements.connectBtn.classList.remove('hidden');
+            elements.disconnectBtn.classList.add('hidden');
+        }
+
+        function saveDumpToFile(dump) {
+            const blob = new Blob([new Uint8Array(dump.data)], { type: 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `pc12_dump_${dump.id}.syx`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function clearDumps() {
+            dumps = [];
+            renderDumps();
+            updateStatus('Dumps cleared');
+        }
+
+        function formatHex(data, maxBytes = 32) {
+            const bytes = data.slice(0, maxBytes);
+            const hex = bytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+            return data.length > maxBytes ? `${hex}...` : hex;
+        }
+
+        function analyzeSysex(data) {
+            return {
+                manufacturer: data[1] ? `0x${data[1].toString(16).padStart(2, '0')}` : 'N/A',
+                deviceId: data[2] ? `0x${data[2].toString(16).padStart(2, '0')}` : 'N/A',
+                command: data[3] ? `0x${data[3].toString(16).padStart(2, '0')}` : 'N/A',
+                dataLength: data.length - 2
+            };
+        }
+
+        function renderDumps() {
+            elements.dumpCount.textContent = dumps.length;
+            
+            if (dumps.length === 0) {
+                elements.clearBtn.classList.add('hidden');
+                elements.dumpsContainer.innerHTML = `
+                    <div class="text-center py-12 text-gray-500">
+                        <div class="text-5xl mb-4">📄</div>
+                        <p>No SysEx dumps captured yet</p>
+                        <p class="text-sm">Connect and trigger a dump from your PC12</p>
+                    </div>
+                `;
+                return;
+            }
+
+            elements.clearBtn.classList.remove('hidden');
+            
+            elements.dumpsContainer.innerHTML = dumps.map(dump => {
+                const analysis = analyzeSysex(dump.data);
+                return `
+                    <div class="bg-gray-900 rounded-lg p-4 mb-4">
+                        <div class="flex items-start justify-between mb-3">
+                            <div>
+                                <p class="font-semibold text-blue-400">${dump.timestamp}</p>
+                                <p class="text-sm text-gray-400">${dump.size} bytes</p>
+                            </div>
+                            <button onclick="downloadDump(${dump.id})" class="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded transition">
+                                ⬇️ Download .syx
+                            </button>
+                        </div>
+
+                        <div class="space-y-2 text-sm">
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <span class="text-gray-400">Manufacturer ID:</span>
+                                    <span class="ml-2 font-mono text-green-400">${analysis.manufacturer}</span>
+                                </div>
+                                <div>
+                                    <span class="text-gray-400">Device ID:</span>
+                                    <span class="ml-2 font-mono text-green-400">${analysis.deviceId}</span>
+                                </div>
+                                <div>
+                                    <span class="text-gray-400">Command:</span>
+                                    <span class="ml-2 font-mono text-green-400">${analysis.command}</span>
+                                </div>
+                                <div>
+                                    <span class="text-gray-400">Data Length:</span>
+                                    <span class="ml-2 font-mono text-green-400">${analysis.dataLength} bytes</span>
+                                </div>
+                            </div>
+
+                            <div>
+                                <p class="text-gray-400 mb-1">Hex Data (first 32 bytes):</p>
+                                <code class="block bg-black p-2 rounded font-mono text-xs text-green-400 overflow-x-auto">
+                                    ${formatHex(dump.data)}
+                                </code>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Make downloadDump globally accessible
+        window.downloadDump = function(id) {
+            const dump = dumps.find(d => d.id === id);
+            if (dump) saveDumpToFile(dump);
+        };
+
+        // Event listeners
+        elements.connectBtn.addEventListener('click', connectToPC12);
+        elements.disconnectBtn.addEventListener('click', disconnect);
+        elements.clearBtn.addEventListener('click', clearDumps);
+
+        // Initialize MIDI
+        if (navigator.requestMIDIAccess) {
+            navigator.requestMIDIAccess({ sysex: true })
+                .then(access => {
+                    midiAccess = access;
+                    updateStatus('MIDI Access granted. Looking for PC12...');
+                    findPC12(access);
+                })
+                .catch(err => {
+                    updateStatus('MIDI Access denied: ' + err.message);
+                    console.error('MIDI Error:', err);
+                });
+        } else {
+            updateStatus('Web MIDI API not supported. Use Chrome or Edge.');
+        }
+    </script>
+</body>
+</html>
