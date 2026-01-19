@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PC12 Dump Analyzer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 p-6">
+    <div class="max-w-6xl mx-auto">
+        <h1 class="text-3xl font-bold mb-2">PC12 SysEx Dump Analyzer</h1>
+        <p class="text-gray-400 mb-6">Load and compare .syx dumps to discover the data format</p>
+
+        <div class="grid grid-cols-2 gap-6 mb-6">
+            <div class="bg-gray-800 rounded-lg p-4">
+                <h2 class="font-semibold mb-3">Dump 1 (Baseline)</h2>
+                <input type="file" id="file1" accept=".syx" class="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:bg-blue-600 file:text-white hover:file:bg-blue-700">
+                <p id="file1-info" class="mt-2 text-sm text-gray-500"></p>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4">
+                <h2 class="font-semibold mb-3">Dump 2 (Changed)</h2>
+                <input type="file" id="file2" accept=".syx" class="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:bg-blue-600 file:text-white hover:file:bg-blue-700">
+                <p id="file2-info" class="mt-2 text-sm text-gray-500"></p>
+            </div>
+        </div>
+
+        <div class="flex gap-4 mb-6">
+            <button id="compare-btn" class="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                Compare Dumps
+            </button>
+            <button id="analyze-btn" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                Analyze Structure
+            </button>
+        </div>
+
+        <div id="results" class="space-y-6"></div>
+    </div>
+
+    <script type="module">
+        // Parser functions (inline for simplicity)
+        function decodeCC(byte1, byte2) {
+            return ((byte1 & 0x0F) << 4) | (byte2 & 0x0F);
+        }
+
+        function decodeChannel(byte) {
+            return (byte & 0x0F) + 1;
+        }
+
+        const KNOWN_OFFSETS = {
+            col1RowA: { channel: 24, cc: [27, 28] },
+            col2RowA: { cc: [41, 42] },
+            col1RowB: { cc: [260, 261] },
+            button1: { cc: [1430, 1431] }
+        };
+
+        let dump1 = null;
+        let dump2 = null;
+
+        const file1Input = document.getElementById('file1');
+        const file2Input = document.getElementById('file2');
+        const file1Info = document.getElementById('file1-info');
+        const file2Info = document.getElementById('file2-info');
+        const compareBtn = document.getElementById('compare-btn');
+        const analyzeBtn = document.getElementById('analyze-btn');
+        const results = document.getElementById('results');
+
+        function updateButtons() {
+            compareBtn.disabled = !(dump1 && dump2);
+            analyzeBtn.disabled = !dump1;
+        }
+
+        async function loadFile(file) {
+            const buffer = await file.arrayBuffer();
+            return new Uint8Array(buffer);
+        }
+
+        file1Input.addEventListener('change', async (e) => {
+            if (e.target.files[0]) {
+                dump1 = await loadFile(e.target.files[0]);
+                file1Info.textContent = `Loaded: ${dump1.length} bytes`;
+                updateButtons();
+            }
+        });
+
+        file2Input.addEventListener('change', async (e) => {
+            if (e.target.files[0]) {
+                dump2 = await loadFile(e.target.files[0]);
+                file2Info.textContent = `Loaded: ${dump2.length} bytes`;
+                updateButtons();
+            }
+        });
+
+        compareBtn.addEventListener('click', () => {
+            const differences = [];
+            for (let i = 0; i < Math.max(dump1.length, dump2.length); i++) {
+                if (dump1[i] !== dump2[i]) {
+                    differences.push({
+                        offset: i,
+                        byte1: dump1[i],
+                        byte2: dump2[i]
+                    });
+                }
+            }
+
+            let html = `
+                <div class="bg-gray-800 rounded-lg p-4">
+                    <h2 class="text-xl font-bold mb-4">Differences Found: ${differences.length}</h2>
+                    <table class="w-full text-sm">
+                        <thead>
+                            <tr class="text-left text-gray-400">
+                                <th class="pb-2">Offset</th>
+                                <th class="pb-2">Hex Offset</th>
+                                <th class="pb-2">Dump 1</th>
+                                <th class="pb-2">Dump 2</th>
+                                <th class="pb-2">Decoded CC (with prev byte)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+            `;
+
+            for (const diff of differences) {
+                const prevByte1 = diff.offset > 0 ? dump1[diff.offset - 1] : 0;
+                const prevByte2 = diff.offset > 0 ? dump2[diff.offset - 1] : 0;
+                const cc1 = decodeCC(prevByte1, diff.byte1);
+                const cc2 = decodeCC(prevByte2, diff.byte2);
+
+                html += `
+                    <tr class="border-t border-gray-700">
+                        <td class="py-2 font-mono">${diff.offset}</td>
+                        <td class="py-2 font-mono text-gray-400">0x${diff.offset.toString(16).padStart(4, '0')}</td>
+                        <td class="py-2 font-mono text-red-400">0x${diff.byte1?.toString(16).padStart(2, '0') ?? 'N/A'} (${diff.byte1})</td>
+                        <td class="py-2 font-mono text-green-400">0x${diff.byte2?.toString(16).padStart(2, '0') ?? 'N/A'} (${diff.byte2})</td>
+                        <td class="py-2 font-mono text-yellow-400">${cc1} → ${cc2}</td>
+                    </tr>
+                `;
+            }
+
+            html += '</tbody></table></div>';
+            results.innerHTML = html;
+        });
+
+        analyzeBtn.addEventListener('click', () => {
+            // Find all 'M' markers and decode potential CC values
+            const markers = [];
+            for (let i = 0; i < dump1.length - 2; i++) {
+                if (dump1[i] === 0x4D) { // 'M'
+                    markers.push({
+                        offset: i,
+                        bytes: [dump1[i], dump1[i+1], dump1[i+2]],
+                        decodedCC: decodeCC(dump1[i+1], dump1[i+2])
+                    });
+                }
+            }
+
+            // Decode known values
+            const knownValues = {
+                'Col1 Row A Channel': decodeChannel(dump1[24]),
+                'Col1 Row A CC': decodeCC(dump1[27], dump1[28]),
+                'Col2 Row A CC': decodeCC(dump1[41], dump1[42]),
+                'Col1 Row B CC': decodeCC(dump1[260], dump1[261]),
+                'Button 1 CC': decodeCC(dump1[1430], dump1[1431])
+            };
+
+            let html = `
+                <div class="bg-gray-800 rounded-lg p-4 mb-6">
+                    <h2 class="text-xl font-bold mb-4">Known Decoded Values</h2>
+                    <div class="grid grid-cols-2 gap-4">
+                        ${Object.entries(knownValues).map(([key, val]) => `
+                            <div class="bg-gray-900 rounded p-3">
+                                <span class="text-gray-400">${key}:</span>
+                                <span class="ml-2 font-mono text-green-400">${val}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+
+                <div class="bg-gray-800 rounded-lg p-4">
+                    <h2 class="text-xl font-bold mb-4">'M' Markers Found: ${markers.length}</h2>
+                    <p class="text-gray-400 mb-4">Each 'M' (0x4D) marker followed by 2 bytes that may encode a CC value</p>
+                    <div class="max-h-96 overflow-y-auto">
+                        <table class="w-full text-sm">
+                            <thead class="sticky top-0 bg-gray-800">
+                                <tr class="text-left text-gray-400">
+                                    <th class="pb-2">Offset</th>
+                                    <th class="pb-2">Bytes (hex)</th>
+                                    <th class="pb-2">Decoded CC</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${markers.map(m => `
+                                    <tr class="border-t border-gray-700">
+                                        <td class="py-1 font-mono">${m.offset} (0x${m.offset.toString(16)})</td>
+                                        <td class="py-1 font-mono text-blue-400">${m.bytes.map(b => b.toString(16).padStart(2, '0')).join(' ')}</td>
+                                        <td class="py-1 font-mono text-green-400">${m.decodedCC}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+
+            results.innerHTML = html;
+        });
+    </script>
+</body>
+</html>
